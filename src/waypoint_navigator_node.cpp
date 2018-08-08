@@ -31,6 +31,7 @@
 #include <iostream>
 
 #include <waypoint_navigator/waypoint_navigator_node.h>
+//with lawn mower
 
 namespace waypoint_navigator {
 const double WaypointNavigatorNode::kCommandTimerFrequency = 5.0;
@@ -46,7 +47,8 @@ WaypointNavigatorNode::WaypointNavigatorNode(const ros::NodeHandle& nh,
                                              const ros::NodeHandle& nh_private)
     : nh_(nh),
       nh_private_(nh_private),
-      got_odometry_(false)
+      got_odometry_(false),
+      got_path_(false)
 
 {
   loadParameters();
@@ -57,6 +59,10 @@ WaypointNavigatorNode::WaypointNavigatorNode(const ros::NodeHandle& nh,
       mav_msgs::default_topics::COMMAND_POSE, 1);
   path_segments_publisher_ =
       nh_.advertise<planning_msgs::PolynomialTrajectory4D>("path_segments", 1);
+  
+  //old_path_planning_path subscriber
+  path_subscriber_ = nh_.subscribe(
+      "/planned_path", 1, &WaypointNavigatorNode::plannedPathCallback, this);
 
   // Visualization.
   path_points_marker_publisher_ = nh_.advertise<visualization_msgs::Marker>(
@@ -66,10 +72,25 @@ WaypointNavigatorNode::WaypointNavigatorNode(const ros::NodeHandle& nh,
   polynomial_publisher_ = nh_.advertise<visualization_msgs::MarkerArray>(
       "waypoint_navigator_polynomial_markers", 1, true);
 
+  // Services
   visualize_service_ = nh_.advertiseService(
       "visualize_path", &WaypointNavigatorNode::visualizePathCallback, this);
+
+  visualize_planned_path_service_ = nh_.advertiseService(
+      "visualize_planned_path", &WaypointNavigatorNode::visualizePathPlannedCallback, this);
+
+  visualize_lawn_mower_service_ = nh_.advertiseService(
+      "visualize_lawn_mower_path", &WaypointNavigatorNode::visualizePathLawnMowerCallback, this);
+
   start_service_ = nh_.advertiseService(
       "execute_path", &WaypointNavigatorNode::executePathCallback, this);
+
+  start_planned_path_service_ = nh_.advertiseService(
+      "execute_planned_path", &WaypointNavigatorNode::executePathPlannedCallback, this);
+
+  start_lawn_mower_service_ = nh_.advertiseService(
+      "execute_lawn_mower_path", &WaypointNavigatorNode::executePathLawnMowerCallback, this);
+
   takeoff_service_ = nh_.advertiseService(
       "takeoff", &WaypointNavigatorNode::takeoffCallback, this);
   land_service_ =
@@ -247,6 +268,221 @@ bool WaypointNavigatorNode::loadPathFromFile() {
   current_leg_ = 0;
   return true;
 }
+ 
+/////////////////////////////path planning stuff
+
+bool WaypointNavigatorNode::loadPathFromPathPlanning() {
+  // Fetch the trajectory from the parameter server.
+
+  CHECK(got_path_)<<"No planned path recieved";
+  trajectory_msgs::MultiDOFJointTrajectory msg = traj_msg_;
+  trajectory_msgs::MultiDOFJointTrajectoryPoint point_msg;
+  int num_waypoints = int(msg.points.size());
+
+  std::cout << num_waypoints <<"###########################################################"<< std::endl;
+
+    if (num_waypoints>1) //valid number of waypoints
+
+        {     
+        coarse_waypoints_.clear();
+        addCurrentOdometryWaypoint();
+        
+        for(int index=0 ; index < num_waypoints ; index++)
+        { 
+          mav_msgs::EigenTrajectoryPoint cwp;
+          point_msg = msg.points[index];
+ 
+
+          point_msg.transforms.resize(1);
+     
+          cwp.position_W.x() = point_msg.transforms[0].translation.x;
+          cwp.position_W.y() = point_msg.transforms[0].translation.y;
+          cwp.position_W.z() = point_msg.transforms[0].translation.z;
+
+          coarse_waypoints_.push_back(cwp);
+
+        }
+
+        }
+
+
+  // Add heading to be zero
+  for (size_t i = 1; i < coarse_waypoints_.size(); i++) {
+     
+      coarse_waypoints_[i].setFromYaw(0.0);
+    
+  }
+
+
+  // Limit maximum distance between waypoints.
+  if (intermediate_poses_) {
+    addIntermediateWaypoints();
+  }
+
+  LOG(INFO) << "Path loaded planning algorithm. Number of points in path: "
+            << coarse_waypoints_.size();
+
+  current_leg_ = 0;
+  return true;
+}
+
+
+
+/////////////////////////////
+
+void WaypointNavigatorNode::pushback(std::vector<double>& e, std::vector<double>& n, std::vector<double>& h, double x, double y, double ele) {
+
+  e.push_back(x);
+  n.push_back(y);
+  h.push_back(ele);
+
+}
+
+bool WaypointNavigatorNode::loadPathLikeLawnMower() {
+  // Fetch the params from the parameter server
+  
+  std::vector<double> start; //minx miny
+  std::vector<double> end; //maxx maxy
+  double elevation;
+  double x_step;
+
+  std::vector<double> easting;
+  std::vector<double> northing;
+  std::vector<double> height;
+  std::vector<double> heading;
+
+  
+  CHECK(nh_private_.getParam("start", start) &&
+        nh_private_.getParam("end", end) &&
+        nh_private_.getParam("elevation", elevation)&&
+        nh_private_.getParam("x_step", x_step))
+      << "Error loading lawn mower parameters!";
+    
+  double X = abs(end[0]-start[0]);
+  double Y = abs(end[1]-start[1]);
+  double x1 = start[0];
+  double y1 = start[1];
+  double x_cur = start[0];
+  double y_cur = start[1];
+
+  pushback(easting,northing,height, x_cur,y_cur,elevation);
+  
+
+  while(fabs(x_cur-x1)<=X){
+	
+	y_cur+=Y;
+	pushback(easting,northing,height, x_cur,y_cur,elevation);
+
+    if(fabs(x_cur-x1)<=X){
+	x_cur+=x_step;
+	pushback(easting,northing,height, x_cur,y_cur,elevation);
+    }
+
+	y_cur-=Y;
+	pushback(easting,northing,height, x_cur,y_cur,elevation);
+
+    if(fabs(x_cur-x1)<=X){
+	x_cur+=x_step;
+	pushback(easting,northing,height, x_cur,y_cur,elevation);
+    }
+
+  }
+
+
+
+
+  if (heading_mode_ == "manual" && !nh_private_.getParam("heading", heading)) {
+    LOG(FATAL) << "Heading in manual mode is unspecified!";
+  }
+
+  // Check for valid trajectory inputs.
+  if (!(easting.size() == northing.size() &&
+        northing.size() == height.size())) {
+    LOG(FATAL) << "Error: path parameter arrays are not the same size";
+  }
+  if (heading_mode_ == "manual" && !(height.size() == heading.size())) {
+    LOG(FATAL) << "Error: path parameter arrays are not the same size";
+  }
+
+  coarse_waypoints_.clear();
+  addCurrentOdometryWaypoint();
+
+  // Add (x,y,z) co-ordinates from file to path.
+  for (size_t i = 0; i < easting.size(); i++) {
+    mav_msgs::EigenTrajectoryPoint cwp;
+    // GPS path co-ordinates.
+    if (coordinate_type_ == "gps") {
+      double initial_latitude;
+      double initial_longitude;
+      double initial_altitude;
+
+      // Convert GPS point to ENU co-ordinates.
+      // NB: waypoint altitude = desired height above reference + registered
+      // reference altitude.
+      geodetic_converter_.getReference(&initial_latitude, &initial_longitude,
+                                       &initial_altitude);
+      geodetic_converter_.geodetic2Enu(
+          northing[i], easting[i], (initial_altitude + height[i]),
+          &cwp.position_W.x(), &cwp.position_W.y(), &cwp.position_W.z());
+    }
+    // ENU path co-ordinates.
+    else if (coordinate_type_ == "enu") {
+      cwp.position_W.x() = easting[i];
+      cwp.position_W.y() = northing[i];
+      cwp.position_W.z() = height[i];
+    }
+    coarse_waypoints_.push_back(cwp);
+  }
+
+  // Add heading from file to path.
+  for (size_t i = 1; i < coarse_waypoints_.size(); i++) {
+    if (heading_mode_ == "manual") {
+      coarse_waypoints_[i].setFromYaw(heading[i] * (M_PI / 180.0));
+    } else if (heading_mode_ == "auto") {
+      // Compute heading in direction towards next point.
+      coarse_waypoints_[i].setFromYaw(
+          atan2(coarse_waypoints_[i].position_W.y() -
+                    coarse_waypoints_[i - 1].position_W.y(),
+                coarse_waypoints_[i].position_W.x() -
+                    coarse_waypoints_[i - 1].position_W.x()));
+    } else if (heading_mode_ == "zero") {
+      coarse_waypoints_[i].setFromYaw(0.0);
+    }
+  }
+
+  // As first target point, add current (x,y) position, but with height at
+  // that of the first requested waypoint, so that the MAV first adjusts height
+  // moving only vertically.
+  if (coarse_waypoints_.size() >= 2) {
+    mav_msgs::EigenTrajectoryPoint vwp;
+    vwp.position_W.x() = odometry_.position_W.x();
+    vwp.position_W.y() = odometry_.position_W.y();
+    vwp.position_W.z() = coarse_waypoints_[1].position_W.z();
+    if (heading_mode_ == "zero") {
+      vwp.setFromYaw(0.0);
+    } else if (heading_mode_ == "manual") {
+      // Do not change heading.
+      vwp.orientation_W_B = coarse_waypoints_[0].orientation_W_B;
+    }
+    coarse_waypoints_.insert(coarse_waypoints_.begin() + 1, vwp);
+  }
+
+  // Limit maximum distance between waypoints.
+  if (intermediate_poses_) {
+    addIntermediateWaypoints();
+  }
+
+  LOG(INFO) << "Path loaded from file. Number of points in path: "
+            << coarse_waypoints_.size();
+
+  current_leg_ = 0;
+  return true;
+}
+
+
+
+
+
 
 void WaypointNavigatorNode::addIntermediateWaypoints() {
   for (size_t i = 1; i < coarse_waypoints_.size(); ++i) {
@@ -283,6 +519,7 @@ void WaypointNavigatorNode::addCurrentOdometryWaypoint() {
   vwp.orientation_W_B = odometry_.orientation_W_B;
   coarse_waypoints_.push_back(vwp);
 }
+
 
 void WaypointNavigatorNode::createTrajectory() {
   polynomial_vertices_.clear();
@@ -391,6 +628,55 @@ bool WaypointNavigatorNode::executePathCallback(
   LOG(INFO) << "Starting path execution...";
   return true;
 }
+
+///////////////////////////////lawn mower execute path
+
+bool WaypointNavigatorNode::executePathLawnMowerCallback(
+    std_srvs::Empty::Request& request, std_srvs::Empty::Response& response) {
+  CHECK(got_odometry_)
+      << "No odometry received yet, can't start path following.";
+  command_timer_.stop();
+  current_leg_ = 0;
+  timer_counter_ = 0;
+
+  CHECK(loadPathLikeLawnMower()) << "Path could not be loaded!";
+
+  // Display the path markers in rviz.
+  std_srvs::Empty::Request empty_request;
+  std_srvs::Empty::Response empty_response;
+  visualizePathLawnMowerCallback(empty_request, empty_response);
+
+  publishCommands();
+  LOG(INFO) << "Starting path execution...";
+  return true;
+}
+
+//////////////////////////////////
+
+
+///////////////////////////////planned trajectory execute path
+
+bool WaypointNavigatorNode::executePathPlannedCallback(
+    std_srvs::Empty::Request& request, std_srvs::Empty::Response& response) {
+  CHECK(got_odometry_)
+      << "No odometry received yet, can't start path following.";
+  command_timer_.stop();
+  current_leg_ = 0;
+  timer_counter_ = 0;
+
+  CHECK(loadPathFromPathPlanning()) << "Path could not be loaded!";
+
+  // Display the path markers in rviz.
+  std_srvs::Empty::Request empty_request;
+  std_srvs::Empty::Response empty_response;
+  visualizePathPlannedCallback(empty_request, empty_response);
+
+  publishCommands();
+  LOG(INFO) << "Starting path execution...";
+  return true;
+}
+
+//////////////////////////////////
 
 bool WaypointNavigatorNode::executePathFromFileCallback(
     waypoint_navigator::ExecutePathFromFile::Request& request,
@@ -566,6 +852,45 @@ bool WaypointNavigatorNode::visualizePathCallback(
   return true;
 }
 
+
+///////////////////////////////vizualize path lawn mower
+
+bool WaypointNavigatorNode::visualizePathLawnMowerCallback(
+    std_srvs::Empty::Request& request, std_srvs::Empty::Response& response) {
+  CHECK(got_odometry_) << "No odometry received yet, can't visualize the path.";
+  CHECK(loadPathLikeLawnMower()) << "Path could not be loaded!";
+
+  if (path_mode_ == "polynomial") {
+    createTrajectory();
+  }
+
+  visualization_timer_ =
+      nh_.createTimer(ros::Duration(0.1),
+                      &WaypointNavigatorNode::visualizationTimerCallback, this);
+  return true;
+}
+
+/////////////////////////////////////
+
+
+///////////////////////////////vizualize path planned trajectory
+
+bool WaypointNavigatorNode::visualizePathPlannedCallback(
+    std_srvs::Empty::Request& request, std_srvs::Empty::Response& response) {
+  CHECK(got_odometry_) << "No odometry received yet, can't visualize the path.";
+  CHECK(loadPathFromPathPlanning()) << "Path could not be loaded!";
+
+
+    createTrajectory();
+
+  visualization_timer_ =
+      nh_.createTimer(ros::Duration(0.1),
+                      &WaypointNavigatorNode::visualizationTimerCallback, this);
+  return true;
+}
+
+/////////////////////////////////////
+
 void WaypointNavigatorNode::poseTimerCallback(const ros::TimerEvent&) {
   // Check for leg completion based on distance.
   // If current leg has been completed, go to the next one.
@@ -679,7 +1004,21 @@ void WaypointNavigatorNode::odometryCallback(
   }
   mav_msgs::eigenOdometryFromMsg(*odometry_message, &odometry_);
 }
+
+//////////////////////////////plannedpathcallback
+
+void WaypointNavigatorNode::plannedPathCallback(trajectory_msgs::MultiDOFJointTrajectory msg) {
+  if (!got_path_) {
+    got_path_ = true;
+  }
+  
+  traj_msg_= msg;
+  
 }
+}
+
+
+///////////////////////////////
 
 int main(int argc, char** argv) {
   // Start the logging.

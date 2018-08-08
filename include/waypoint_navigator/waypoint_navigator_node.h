@@ -44,6 +44,7 @@
 #include <waypoint_navigator/GoToHeight.h>
 #include <waypoint_navigator/GoToWaypoint.h>
 #include <waypoint_navigator/GoToWaypoints.h>
+//with lawn mower
 
 namespace waypoint_navigator {
 class WaypointNavigatorNode {
@@ -61,6 +62,14 @@ class WaypointNavigatorNode {
   // NB: Only call after odometry has been received, as
   // MAV position is set as first point.
   bool loadPathFromFile();
+  //take path from old_path_planning
+  bool loadPathFromPathPlanning();
+
+  // Push lawn mower intermediate points to easting, northing, height vectors
+  void pushback(std::vector<double>& e, std::vector<double>& n, std::vector<double>& h, double x, double y, double ele);
+
+  // Load points based on Lawn mower pattern generator 
+  bool loadPathLikeLawnMower();
 
   // Interpolates intermediate points between waypoints in a sequence.
   void addIntermediateWaypoints();
@@ -80,6 +89,14 @@ class WaypointNavigatorNode {
   // Service callbacks.
   // Starts the execution of a loaded path.
   bool executePathCallback(std_srvs::Empty::Request& request,
+                           std_srvs::Empty::Response& response);
+
+  // Starts the execution of recieved planned path.
+  bool executePathPlannedCallback(std_srvs::Empty::Request& request,
+                           std_srvs::Empty::Response& response);
+
+  //Starts the execution of a loaded Lawn Mower path.
+  bool executePathLawnMowerCallback(std_srvs::Empty::Request& request,
                            std_srvs::Empty::Response& response);
   // Executes a new mission from .yaml file
   bool executePathFromFileCallback(
@@ -109,12 +126,22 @@ class WaypointNavigatorNode {
   // Publish path rviz markers given most recent odometry measurement.
   bool visualizePathCallback(std_srvs::Empty::Request& request,
                              std_srvs::Empty::Response& response);
+
+  // Publish path rviz markers given most recent odometry measurement.
+  bool visualizePathPlannedCallback(std_srvs::Empty::Request& request,
+                             std_srvs::Empty::Response& response);
+
+  // Publish Lawn Mower path rviz markers given most recent odometry measurement.
+  bool visualizePathLawnMowerCallback(std_srvs::Empty::Request& request,
+                             std_srvs::Empty::Response& response);
+
   // Publishes a single waypoint to go to if the path mode is 'poses' [5Hz].
   void poseTimerCallback(const ros::TimerEvent&);
   // Show path commands published in rviz
   void visualizationTimerCallback(const ros::TimerEvent&);
 
   void odometryCallback(const nav_msgs::OdometryConstPtr& odometry_message);
+  void plannedPathCallback(trajectory_msgs::MultiDOFJointTrajectory msg);
 
   static const double kCommandTimerFrequency;
   // Distance before a waypoint is considered reached [m].
@@ -141,9 +168,14 @@ class WaypointNavigatorNode {
   ros::Publisher polynomial_publisher_;
 
   ros::Subscriber odometry_subscriber_;
+  ros::Subscriber path_subscriber_;
 
   ros::ServiceServer visualize_service_;
+  ros::ServiceServer visualize_planned_path_service_;
+  ros::ServiceServer visualize_lawn_mower_service_;
   ros::ServiceServer start_service_;
+  ros::ServiceServer start_planned_path_service_;
+  ros::ServiceServer start_lawn_mower_service_;
   ros::ServiceServer takeoff_service_;
   ros::ServiceServer land_service_;
   ros::ServiceServer abort_path_service_;
@@ -181,11 +213,14 @@ class WaypointNavigatorNode {
   geodetic_converter::GeodeticConverter geodetic_converter_;
 
   bool got_odometry_;
+  bool got_path_;
   mav_msgs::EigenOdometry odometry_;
 
   // A list of waypoints to visit.
   // [x,y,z,heading]
   std::vector<mav_msgs::EigenTrajectoryPoint> coarse_waypoints_;
+  // Recieved planned trajectory message
+  trajectory_msgs::MultiDOFJointTrajectory traj_msg_;
 
   // Polynomial trajectory markers.
   visualization_msgs::MarkerArray markers_;

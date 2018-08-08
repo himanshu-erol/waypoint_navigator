@@ -1,6 +1,14 @@
 # waypoint_navigator
 
+
+Forked repository with added services for path planning and moving in lawn mover pattern.
+
+* Parameters are stored in a .yaml file defining the trajectory to execute, which should be loaded to the parameter server. See ``trajectory_simple_enu.yaml`` .
+
+
 <p align="center"><img src="http://i.imgur.com/dDE4BA9.png" height="300"/>  <img src="http://i.imgur.com/Hl1lGQM.png" height="300"/></p>
+
+
 
 This repository contains high-level waypoint-following for micro aerial vehicles (MAVs).
 GPS/ENU co-ordinates are accepted as input destinations, and an illustrative example is provided in the [RotorS](https://github.com/ethz-asl/rotors_simulator/wiki) simulator.
